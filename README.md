@@ -1,6 +1,9 @@
 
 # WiFiManager
 
+NOTE ABOUT THIS FORK: it adds WPA 2 Enterprise without CA Validation. Requires a custom parameter called "wpaUser".
+===================================================================================================================
+
 Espressif ESPx WiFi Connection manager with fallback web configuration portal
 
 :warning: This Documentation is out of date, see notes below
