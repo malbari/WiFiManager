@@ -1,0 +1,1 @@
+../wm_strings_fr.h
