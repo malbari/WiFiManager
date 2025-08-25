@@ -15,6 +15,11 @@
 #include <esp_wifi.h>
 #include <esp_wpa2.h>
 
+// Note: added by fork: START
+#include <nvs_flash.h>
+#include <nvs.h>
+// Note: added by fork: END
+
 #if defined(ESP8266) || defined(ESP32)
 
 #ifdef ESP32
@@ -1251,201 +1256,240 @@ uint8_t WiFiManager::connectWifi(String ssid, String pass, bool connect)
   return connRes;
 }
 
-// NOTE: Added by fork: START
+//////////////////////////////////
+// NOTE: Modified by fork: START
+//////////////////////////////////
 
-String getParameter(WiFiManagerParameter **params, int count, char *paramName)
-{
-  String result = "";
 
-  for (int i = 0; i < count; i++)
-  {
-    if (params[i] != nullptr && params[i]->getID() != nullptr)
-    {
-      if (strcmp(params[i]->getID(), paramName) == 0)
-      {
-        const char *value = params[i]->getValue();
-        if (value != nullptr)
-        {
-          result = String(value);
-        }
-        break;
+/**
+ * Retrieve a parameter value by ID from the WiFiManager parameters array
+ */
+String getParameter(WiFiManagerParameter** params, int count, const char* id) {
+  if (!params || !id) return "";
+
+  for (int i = 0; i < count; i++) {
+    if (params[i] != nullptr && params[i]->getID() != nullptr) {
+      if (strcmp(params[i]->getID(), id) == 0) {
+        const char* value = params[i]->getValue();
+        return String(value != nullptr ? value : "");
       }
     }
   }
-
-  return result;
+  return "";
 }
 
-// String wpaUser = getParameter(getParameters(), getParametersCount(), "wpaUser");
+/**
+ * Save WPA Enterprise credentials to NVS (EAP user and password)
+ * This allows automatic reconnect after reboot.
+ */
+void saveWpaEnterpriseCredentials(const String& user, const String& password) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open("wifi", NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    Serial.println("[ERROR] Failed to open NVS for writing\n");
+    return;
+  }
 
-bool WiFiManager::wifiConnectNew(String ssid, String pass, bool connect)
-{
+  err = nvs_set_str(handle, "eap_user", user.c_str());
+  if (err == ESP_OK) {
+    err = nvs_set_str(handle, "eap_pass", password.c_str());
+  }
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  if (err != ESP_OK) {
+    Serial.println("[ERROR] Failed to save credentials to NVS:" + err);
+  }
+
+  nvs_close(handle);
+}
+
+/**
+ * Load WPA Enterprise credentials from NVS
+ * @param user Output: loaded EAP username
+ * @param pass Output: loaded EAP password
+ * @return bool: true if credentials were found and loaded
+ */
+bool loadWpaEnterpriseCredentials(String& user, String& pass) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open("wifi", NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    return false;
+  }
+
+  size_t len;
+  err = nvs_get_str(handle, "eap_user", nullptr, &len);
+  if (err != ESP_OK) {
+    nvs_close(handle);
+    return false;
+  }
+
+  char* userBuf = new char[len];
+  char* passBuf = new char[64];  // Max password length
+  userBuf[0] = '\0';
+  passBuf[0] = '\0';
+
+  err = nvs_get_str(handle, "eap_user", userBuf, &len);
+  if (err == ESP_OK) {
+    user = String(userBuf);
+    err = nvs_get_str(handle, "eap_pass", passBuf, &len);
+    if (err == ESP_OK) {
+      pass = String(passBuf);
+    }
+  }
+
+  delete[] userBuf;
+  delete[] passBuf;
+  nvs_close(handle);
+
+  return (err == ESP_OK) && user.length() > 0 && pass.length() > 0;
+}
+
+/**
+ * Connect to a new WiFi access point.
+ * Uses WPA2-Personal (PSK) if no wpaUser is set.
+ * Uses WPA2-Enterprise with esp_wifi_* APIs if wpaUser is provided.
+ */
+bool WiFiManager::wifiConnectNew(String ssid, String pass, bool connect) {
   bool ret = false;
-
-#ifdef WM_DEBUG_LEVEL
-  DEBUG_WM(F("Connecting to NEW AP:"), ssid);
-  DEBUG_WM(WM_DEBUG_DEV, F("Using Password:"), pass);
-#endif
-
-  WiFi_enableSTA(true, storeSTAmode);
-  WiFi.persistent(true);
-
   String wpaUser = getParameter(getParameters(), getParametersCount(), "wpaUser");
 
-  if (wpaUser.length() > 0)
-  {
-#ifdef ESP32
-    esp_wifi_stop();
+  if (wpaUser.length() == 0) {
+    // === WPA2-Personal: original WiFiManager logic ===
+    DEBUG_WM(F("Connecting to NEW AP:"), ssid);
+    DEBUG_WM(WM_DEBUG_DEV, F("Using Password:"), pass);
+
+    WiFi_enableSTA(true, storeSTAmode);
+    WiFi.persistent(true);
+    ret = WiFi.begin(ssid.c_str(), pass.c_str(), 0, NULL, connect);
+    WiFi.persistent(false);
+
+    if (!ret) {
+      DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] wifi begin failed"));
+    }
+  } else {
+    // === WPA2-Enterprise: use pure esp_wifi_* APIs ===
+    DEBUG_WM(F("Connecting to NEW AP (WPA Enterprise):"), ssid);
+    DEBUG_WM(WM_DEBUG_DEV, F("Using EAP User:"), wpaUser);
+
+    WiFi_enableSTA(true, storeSTAmode);
+    WiFi.mode(WIFI_OFF);
+    delay(10);
+
+    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
 
     wifi_config_t wifi_config;
     memset(&wifi_config, 0, sizeof(wifi_config));
-    strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
+    strlcpy((char*)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
-    // Configura EAP
-    esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)wpaUser.c_str(), wpaUser.length());
-    esp_wifi_sta_wpa2_ent_set_username((uint8_t *)wpaUser.c_str(), wpaUser.length());
-    esp_wifi_sta_wpa2_ent_set_password((uint8_t *)pass.c_str(), pass.length());
+    esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)wpaUser.c_str(), wpaUser.length());
+    esp_wifi_sta_wpa2_ent_set_username((uint8_t*)wpaUser.c_str(), wpaUser.length());
+    esp_wifi_sta_wpa2_ent_set_password((uint8_t*)pass.c_str(), pass.length());
 
     esp_err_t err = esp_wifi_sta_wpa2_ent_enable();
-    if (err != ESP_OK)
-    {
-#ifdef WM_DEBUG_LEVEL
+    if (err != ESP_OK) {
       DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] Failed to enable WPA2 Enterprise:"), err);
-#endif
       ret = false;
-    }
-    else
-    {
-      ret = esp_wifi_start() == ESP_OK;
-      if (ret && connect)
-      {
-        ret = esp_wifi_connect() == ESP_OK;
+    } else {
+      ret = (esp_wifi_connect() == ESP_OK);
+      // Save to NVS only if connection succeeded
+      if (ret) {
+        saveWpaEnterpriseCredentials(wpaUser, pass);
       }
     }
-#else
-#ifdef WM_DEBUG_LEVEL
-    DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] WPA Enterprise not supported"));
-#endif
-    ret = false;
-#endif
   }
-  else
-  {
-    ret = WiFi.begin(ssid.c_str(), pass.c_str(), 0, NULL, connect);
-  }
-
-  WiFi.persistent(false);
-
-#ifdef WM_DEBUG_LEVEL
-  if (!ret)
-  {
-    DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] WiFi begin failed"));
-  }
-#endif
 
   return ret;
 }
 
 /**
- * Connect to saved WiFi credentials
- * Supports WPA2-Personal or WPA2-Enterprise based on saved wpaUser parameter.
- *
- * @return bool: true on success
+ * Reconnect to previously saved WiFi network.
+ * For WPA2-Personal: uses saved SSID and PSK via WiFi.begin()
+ * For WPA2-Enterprise: loads EAP credentials from NVS and reconnects via esp_wifi_* APIs
  */
-bool WiFiManager::wifiConnectDefault()
-{
+bool WiFiManager::wifiConnectDefault() {
   bool ret = false;
-
-  String ssid = WiFi_SSID(true);
-  String pass = WiFi_psk(true);
-
-#ifdef WM_DEBUG_LEVEL
-  DEBUG_WM(F("Connecting to SAVED AP:"), ssid);
-  DEBUG_WM(WM_DEBUG_DEV, F("Using Password:"), pass);
-#endif
-
-  // Enable STA mode
-  ret = WiFi_enableSTA(true, storeSTAmode);
-  delay(500); // Allow time for mode change
-
-#ifdef WM_DEBUG_LEVEL
-  DEBUG_WM(WM_DEBUG_DEV, F("Mode after delay: "), getModeString(WiFi.getMode()));
-  if (!ret)
-  {
-    DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] WiFi enableSTA failed"));
-  }
-#endif
-
-  // Try to get WPA Enterprise username from saved parameters
   String wpaUser = getParameter(getParameters(), getParametersCount(), "wpaUser");
 
-  if (wpaUser.length() > 0)
-  {
-    // ================================
-    // WPA2-Enterprise Mode
-    // ================================
+  if (wpaUser.length() == 0) {
+    // === WPA2-Personal: original logic ===
+    DEBUG_WM(F("Connecting to SAVED AP:"), WiFi_SSID(true));
+    DEBUG_WM(WM_DEBUG_DEV, F("Using Password:"), WiFi_psk(true));
 
-#ifdef ESP32
-    esp_wifi_stop();
+    ret = WiFi_enableSTA(true, storeSTAmode);
+    delay(500);
+
+    DEBUG_WM(WM_DEBUG_DEV, F("Mode after delay: "), getModeString(WiFi.getMode()));
+    if (!ret) {
+      DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] wifi enableSta failed"));
+    }
+
+    ret = WiFi.begin();
+
+    if (!ret) {
+      DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] wifi begin failed"));
+    }
+  } else {
+    // === WPA2-Enterprise: reconnect using saved credentials from NVS ===
+    DEBUG_WM(F("Reconnecting using WPA Enterprise credentials from NVS"));
+
+    String ssid = WiFi_SSID(true);
+    String loadedUser, loadedPass;
+
+    if (!loadWpaEnterpriseCredentials(loadedUser, loadedPass)) {
+      DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] No WPA Enterprise credentials found in NVS"));
+      return false;
+    }
+
+    if (ssid.length() == 0) {
+      DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] No saved SSID"));
+      return false;
+    }
+
+    ret = WiFi_enableSTA(true, storeSTAmode);
+    delay(500);
+
+    if (!ret) {
+      DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] Failed to enable STA mode"));
+      return false;
+    }
+
+    WiFi.mode(WIFI_OFF);
+    delay(10);
+
+    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
 
     wifi_config_t wifi_config;
     memset(&wifi_config, 0, sizeof(wifi_config));
-    strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
+    strlcpy((char*)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
-    esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)wpaUser.c_str(), wpaUser.length());
-    esp_wifi_sta_wpa2_ent_set_username((uint8_t *)wpaUser.c_str(), wpaUser.length());
-    esp_wifi_sta_wpa2_ent_set_password((uint8_t *)pass.c_str(), pass.length());
+    esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)loadedUser.c_str(), loadedUser.length());
+    esp_wifi_sta_wpa2_ent_set_username((uint8_t*)loadedUser.c_str(), loadedUser.length());
+    esp_wifi_sta_wpa2_ent_set_password((uint8_t*)loadedPass.c_str(), loadedPass.length());
 
     esp_err_t err = esp_wifi_sta_wpa2_ent_enable();
-    if (err != ESP_OK)
-    {
-#ifdef WM_DEBUG_LEVEL
+    if (err != ESP_OK) {
       DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] Failed to enable WPA2 Enterprise:"), err);
-#endif
-      ret = false;
+      return false;
     }
-    else
-    {
-      ret = esp_wifi_start() == ESP_OK;
-      if (ret)
-      {
-        ret = esp_wifi_connect() == ESP_OK;
-      }
-    }
-#else
-#ifdef WM_DEBUG_LEVEL
-    DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] WPA Enterprise not supported"));
-#endif
-    ret = false;
-#endif // ESP32
-  }
-  else
-  {
-    // ================================
-    // WPA2-Personal Mode
-    // ================================
-    ret = WiFi.begin();
-  }
 
-#ifdef WM_DEBUG_LEVEL
-  if (!ret)
-  {
-    DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] WiFi begin failed"));
+    ret = (esp_wifi_connect() == ESP_OK);
   }
-  else
-  {
-    DEBUG_WM(F("WiFi connection initiated successfully"));
-  }
-#endif
 
   return ret;
 }
+
+
+//////////////////////////////////
+// NOTE: Modified by fork: END
+//////////////////////////////////
 
 /**
  * set sta config if set
