@@ -1350,9 +1350,14 @@ bool loadWpaEnterpriseCredentials(String& user, String& pass) {
  * Connect to a new WiFi access point.
  * Uses WPA2-Personal (PSK) if no wpaUser is set.
  * Uses WPA2-Enterprise with esp_wifi_* APIs if wpaUser is provided.
+ * Credentials for WPA Enterprise are saved to NVS on successful connection.
  */
 bool WiFiManager::wifiConnectNew(String ssid, String pass, bool connect) {
   bool ret = false;
+
+  WiFi_enableSTA(true, storeSTAmode);
+  WiFi.persistent(true);
+
   String wpaUser = getParameter(getParameters(), getParametersCount(), "wpaUser");
 
   if (wpaUser.length() == 0) {
@@ -1360,8 +1365,6 @@ bool WiFiManager::wifiConnectNew(String ssid, String pass, bool connect) {
     DEBUG_WM(F("Connecting to NEW AP:"), ssid);
     DEBUG_WM(WM_DEBUG_DEV, F("Using Password:"), pass);
 
-    WiFi_enableSTA(true, storeSTAmode);
-    WiFi.persistent(true);
     ret = WiFi.begin(ssid.c_str(), pass.c_str(), 0, NULL, connect);
     WiFi.persistent(false);
 
@@ -1373,34 +1376,39 @@ bool WiFiManager::wifiConnectNew(String ssid, String pass, bool connect) {
     DEBUG_WM(F("Connecting to NEW AP (WPA Enterprise):"), ssid);
     DEBUG_WM(WM_DEBUG_DEV, F("Using EAP User:"), wpaUser);
 
-    WiFi_enableSTA(true, storeSTAmode);
-    WiFi.mode(WIFI_OFF);
-    delay(10);
-
-    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
+#ifdef ESP32
+    // Stop WiFi without deinitializing (safe for esp_wifi_*)
+    esp_wifi_stop();
 
     wifi_config_t wifi_config;
     memset(&wifi_config, 0, sizeof(wifi_config));
     strlcpy((char*)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
+
+    esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
+    // Configure EAP credentials
     esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)wpaUser.c_str(), wpaUser.length());
     esp_wifi_sta_wpa2_ent_set_username((uint8_t*)wpaUser.c_str(), wpaUser.length());
     esp_wifi_sta_wpa2_ent_set_password((uint8_t*)pass.c_str(), pass.length());
 
+    // Enable WPA2 Enterprise
     esp_err_t err = esp_wifi_sta_wpa2_ent_enable();
     if (err != ESP_OK) {
       DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] Failed to enable WPA2 Enterprise:"), err);
       ret = false;
     } else {
-      ret = (esp_wifi_connect() == ESP_OK);
-      // Save to NVS only if connection succeeded
+      ret = (esp_wifi_start() == ESP_OK);
+      if (ret && connect) {
+        ret = (esp_wifi_connect() == ESP_OK);
+      }
+
+      // ✅ Save credentials to NVS only if connection succeeded
       if (ret) {
         saveWpaEnterpriseCredentials(wpaUser, pass);
       }
     }
+#endif
   }
 
   return ret;
@@ -1451,41 +1459,46 @@ bool WiFiManager::wifiConnectDefault() {
     }
 
     ret = WiFi_enableSTA(true, storeSTAmode);
-    delay(500);
-
     if (!ret) {
       DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] Failed to enable STA mode"));
       return false;
     }
 
-    WiFi.mode(WIFI_OFF);
-    delay(10);
+    delay(500);
 
-    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
+#ifdef ESP32
+    // Stop WiFi safely
+    esp_wifi_stop();
 
+    // Configure SSID
     wifi_config_t wifi_config;
     memset(&wifi_config, 0, sizeof(wifi_config));
     strlcpy((char*)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
+    esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
+    // Apply EAP credentials from NVS
     esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)loadedUser.c_str(), loadedUser.length());
     esp_wifi_sta_wpa2_ent_set_username((uint8_t*)loadedUser.c_str(), loadedUser.length());
     esp_wifi_sta_wpa2_ent_set_password((uint8_t*)loadedPass.c_str(), loadedPass.length());
 
+    // Enable WPA2 Enterprise
     esp_err_t err = esp_wifi_sta_wpa2_ent_enable();
     if (err != ESP_OK) {
       DEBUG_WM(WM_DEBUG_ERROR, F("[ERROR] Failed to enable WPA2 Enterprise:"), err);
       return false;
     }
 
-    ret = (esp_wifi_connect() == ESP_OK);
+    // Start and connect
+    ret = (esp_wifi_start() == ESP_OK);
+    if (ret) {
+      ret = (esp_wifi_connect() == ESP_OK);
+    }
+#endif
   }
 
   return ret;
 }
-
 
 //////////////////////////////////
 // NOTE: Modified by fork: END
