@@ -1,12 +1,23 @@
 #include <WiFiManager.h>
 #include <nvs_flash.h>
 #include <nvs.h>
+#include <SPIFFS.h>
 
 void setup()
 {
     Serial.begin(115200);
 
     delay(500);
+
+    if (!SPIFFS.begin(true))
+    {
+        Serial.printf("SPIFFS fallita\n");
+        return;
+    }
+    else
+    {
+        Serial.printf("SPIFFS OK\n");
+    }
 
     Serial.printf("Initializing NVS\n");
 
