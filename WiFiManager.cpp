@@ -12,10 +12,10 @@
 
 #include "WiFiManager.h"
 
-#include <esp_wifi.h>
-#include <esp_wpa2.h>
 
 // Note: added by fork: START
+#include <esp_wifi.h>
+#include <esp_wpa2.h>
 #include <nvs_flash.h>
 #include <nvs.h>
 // Note: added by fork: END
@@ -1481,6 +1481,8 @@ bool WiFiManager::wifiConnectDefault() {
     esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)loadedUser.c_str(), loadedUser.length());
     esp_wifi_sta_wpa2_ent_set_username((uint8_t*)loadedUser.c_str(), loadedUser.length());
     esp_wifi_sta_wpa2_ent_set_password((uint8_t*)loadedPass.c_str(), loadedPass.length());
+
+    esp_wifi_sta_wpa2_ent_set_ca_cert(NULL, 0); 
 
     // Enable WPA2 Enterprise
     esp_err_t err = esp_wifi_sta_wpa2_ent_enable();
